@@ -1,17 +1,21 @@
 import { invoke } from '@tauri-apps/api/core'
+import * as dialogPlugin from '@tauri-apps/plugin-dialog'
 import { platform } from '@tauri-apps/plugin-os'
 import { useCallback, useEffect, useState } from 'react'
 import { toast } from 'sonner'
 import ShortcutRecorder from '~/components/shortcut-recorder'
 import { MeetingServiceIcons } from '~/components/meeting-service-icons'
 import { Button } from '~/components/ui/button'
+import { Input } from '~/components/ui/input'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '~/components/ui/select'
 import { Switch } from '~/components/ui/switch'
 import { getDefaultRecordingShortcut } from '~/lib/config'
+import type { UnchosenScope } from '~/lib/meeting-prompt'
 import type { PermissionStatus } from '~/lib/permissions'
 import { m } from '~/paraglide/messages.js'
 import { useRecordingShortcut } from '~/providers/recording-shortcut'
 import { usePreferenceProvider } from '~/providers/preference'
-import { SettingsGroup, SettingsRow } from './shared'
+import { SettingsGroup, SettingsRow, rowControlClass } from './shared'
 
 type PermissionKind = 'microphone' | 'system_audio'
 
@@ -153,10 +157,21 @@ export function RecordingSection() {
 		setMeetingDetectionEnabled,
 		autoRecordDetectedMeetings,
 		setAutoRecordDetectedMeetings,
+		autoRecordUnchosenScope,
+		setAutoRecordUnchosenScope,
+		sharedScopeLabel,
+		setSharedScopeLabel,
+		personalExportFolder,
+		setPersonalExportFolder,
 		autoTranscribeAfterRecording,
 		setAutoTranscribeAfterRecording,
 	} = usePreferenceProvider()
 	const isMacOS = platform() === 'macos'
+
+	async function choosePersonalFolder() {
+		const picked = await dialogPlugin.open({ multiple: false, directory: true })
+		if (picked && !Array.isArray(picked)) setPersonalExportFolder(picked)
+	}
 
 	return (
 		<div className="space-y-6">
@@ -168,6 +183,42 @@ export function RecordingSection() {
 					<SettingsRow label={m.autoRecordMeetings()} description={m.autoRecordMeetingsInfo()}>
 						<Switch checked={autoRecordDetectedMeetings} onCheckedChange={setAutoRecordDetectedMeetings} aria-label={m.autoRecordMeetings()} />
 					</SettingsRow>
+				)}
+				{meetingDetectionEnabled && autoRecordDetectedMeetings && (
+					<>
+						<SettingsRow label={m.sharedScopeLabel()} description={m.sharedScopeLabelInfo()}>
+							<Input
+								className={`w-44 ${rowControlClass}`}
+								value={sharedScopeLabel}
+								placeholder={m.meetingPromptScopeShared()}
+								onChange={(event) => setSharedScopeLabel(event.target.value)}
+								aria-label={m.sharedScopeLabel()}
+							/>
+						</SettingsRow>
+						<SettingsRow label={m.personalExportFolder()} description={personalExportFolder ?? m.personalExportFolderInfo()}>
+							<div className="flex items-center gap-2">
+								{personalExportFolder && (
+									<Button type="button" variant="ghost" size="sm" onClick={() => setPersonalExportFolder(null)}>
+										{m.personalExportFolderClear()}
+									</Button>
+								)}
+								<Button type="button" variant="outline" size="sm" onClick={() => void choosePersonalFolder()}>
+									{m.selectFolder()}
+								</Button>
+							</div>
+						</SettingsRow>
+						<SettingsRow label={m.autoRecordUnchosenScope()} description={m.autoRecordUnchosenScopeInfo()}>
+							<Select value={autoRecordUnchosenScope} onValueChange={(value: UnchosenScope) => setAutoRecordUnchosenScope(value)}>
+								<SelectTrigger className={`w-52 ${rowControlClass}`}>
+									<SelectValue />
+								</SelectTrigger>
+								<SelectContent>
+									<SelectItem value="personal">{m.autoRecordUnchosenPersonal()}</SelectItem>
+									<SelectItem value="discard">{m.autoRecordUnchosenDiscard()}</SelectItem>
+								</SelectContent>
+							</Select>
+						</SettingsRow>
+					</>
 				)}
 				<MeetPermissionRow enabled={meetingDetectionEnabled} />
 			</SettingsGroup>

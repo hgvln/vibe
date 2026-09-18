@@ -8,18 +8,32 @@ import { CONFIG_KEYS } from '~/lib/config-keys'
 import { readConfig } from '~/lib/config-store'
 import {
 	cancelAutoRecording,
+	chooseRecordingScope,
+	continueAutoRecording,
 	dismissMeetingPrompt,
 	getMeetingPromptState,
 	meetingPromptReady,
+	stopAutoRecording,
 	type MeetingPromptState,
 	type MeetingRecordingOptions,
 	type MeetingSource,
+	type RecordingScope,
+	type UnchosenScope,
 } from '~/lib/meeting-prompt'
 import { supportedLanguages } from '~/lib/i18n'
 import { cn } from '~/lib/style'
 import { m } from '~/paraglide/messages.js'
 import { getLocale, getTextDirection, setLocale } from '~/paraglide/runtime.js'
 import logoUrl from '../../../design/logo.svg?url'
+
+/** The question "record this meeting?" goes away on its own. */
+const ASK_TIMEOUT_MS = 10_000
+/** The notice of an automatic recording waits this long for a choice before counting down... */
+const CHOICE_IDLE_MS = 30_000
+/** ...then counts down this long, visibly, before the default applies. */
+const CHOICE_COUNTDOWN_MS = 15_000
+/** Mirrors END_GRACE in meeting_prompt.rs: the recording stops this long after the call ended. */
+const END_GRACE_MS = 10_000
 
 const serviceNames: Record<MeetingSource, string> = {
 	meet: 'Google Meet',
@@ -70,6 +84,46 @@ function SourceChoice({
 	)
 }
 
+/** A bar that empties as `fraction` goes from 1 to 0. */
+function Countdown({ fraction }: { fraction: number }) {
+	const percent = Math.round(Math.min(1, Math.max(0, fraction)) * 100)
+	return (
+		<div className="h-1 w-full overflow-hidden rounded-full bg-muted" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent}>
+			<div className="h-full rounded-full bg-primary transition-[width] duration-200 ease-linear" style={{ width: `${percent}%` }} />
+		</div>
+	)
+}
+
+/** Milliseconds since `since`, refreshed a few times a second; 0 while there is nothing to time. */
+function useElapsed(since: number | null) {
+	const [elapsed, setElapsed] = useState(0)
+	useEffect(() => {
+		if (since === null) {
+			setElapsed(0)
+			return
+		}
+		setElapsed(Date.now() - since)
+		const timer = window.setInterval(() => setElapsed(Date.now() - since), 200)
+		return () => window.clearInterval(timer)
+	}, [since])
+	return elapsed
+}
+
+function Header({ source, title, description }: { source: MeetingSource; title: string; description: string }) {
+	return (
+		<div className="flex min-w-0 items-center gap-2.5">
+			<div className="relative flex h-9 w-12 shrink-0 items-center">
+				<ServiceIcon source={source} />
+				<img src={logoUrl} alt="" className="absolute end-0 h-5 w-5 rounded-full border-2 border-card" />
+			</div>
+			<div className="min-w-0">
+				<h1 className="truncate text-sm font-semibold leading-5">{title}</h1>
+				<p className="truncate text-xs text-muted-foreground">{description}</p>
+			</div>
+		</div>
+	)
+}
+
 export default function MeetingPromptWindow() {
 	const configuredLocale = readConfig(CONFIG_KEYS.displayLanguage, 'en-US')
 	if (supportedLanguages[configuredLocale] && configuredLocale !== getLocale()) {
@@ -79,8 +133,13 @@ export default function MeetingPromptWindow() {
 	const [state, setState] = useState<MeetingPromptState | null>(null)
 	const [busy, setBusy] = useState(false)
 	const [sources, setSources] = useState<MeetingRecordingOptions>({ microphone: true, systemAudio: true })
+	// When the current state appeared: the notice and the end-of-call question are timed from it.
+	const [shownAt, setShownAt] = useState<number | null>(null)
+	const elapsed = useElapsed(shownAt)
 	const theme = readConfig<'light' | 'dark'>(CONFIG_KEYS.theme, window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
 	const direction = getTextDirection(configuredLocale)
+	const unchosen = readConfig<UnchosenScope>(CONFIG_KEYS.autoRecordUnchosenScope, 'personal')
+	const sharedLabel = readConfig<string>(CONFIG_KEYS.sharedScopeLabel, '').trim() || m.meetingPromptScopeShared()
 
 	useLayoutEffect(() => {
 		document.title = m.appTitle()
@@ -119,12 +178,17 @@ export default function MeetingPromptWindow() {
 		}
 	}, [])
 
+	useEffect(() => {
+		setShownAt(state ? Date.now() : null)
+		setBusy(false)
+	}, [state])
+
 	// The main window reports back after the question's "Record": the question is done. The
-	// notice of an automatic recording is not a question and stays until it is dismissed.
+	// notice of an automatic recording is not a question and stays until it is answered.
 	useEffect(() => {
 		const unlisten = listen<{ started: boolean }>('meeting-prompt-recording-result', ({ payload }) => {
 			setBusy(false)
-			if (payload.started) setState((current) => (current?.mode === 'recording' ? current : null))
+			if (payload.started) setState((current) => (current?.mode === 'ask' ? null : current))
 		})
 		return () => {
 			unlisten.then((dispose) => dispose())
@@ -140,15 +204,26 @@ export default function MeetingPromptWindow() {
 			.catch(() => undefined)
 	}, [state])
 
+	// The question goes away on its own; the end-of-call question is closed by the recording
+	// stopping (the backend hides the window), this is only a safety net.
 	useEffect(() => {
-		if (!state) return
+		if (!state || state.mode === 'recording') return
+		const delay = state.mode === 'ask' ? ASK_TIMEOUT_MS : END_GRACE_MS + 1_000
 		const timeout = window.setTimeout(() => {
 			void dismissMeetingPrompt()
 				.catch((error) => console.error('Failed to auto-dismiss meeting prompt:', error))
 				.finally(() => setState(null))
-		}, 10_000)
+		}, delay)
 		return () => window.clearTimeout(timeout)
 	}, [state])
+
+	// Nobody chose where the transcript goes: the setting decides, once the countdown ran out.
+	useEffect(() => {
+		if (state?.mode !== 'recording' || busy || elapsed < CHOICE_IDLE_MS + CHOICE_COUNTDOWN_MS) return
+		setBusy(true)
+		const apply = unchosen === 'discard' ? cancelAutoRecording() : chooseRecordingScope('personal')
+		void apply.catch((error) => console.error('Failed to apply the default for the unanswered notice:', error)).finally(() => setState(null))
+	}, [busy, elapsed, state, unchosen])
 
 	async function dismiss() {
 		if (busy) return
@@ -173,19 +248,23 @@ export default function MeetingPromptWindow() {
 		}
 	}
 
-	/** The recording started on its own; the user does not want it. */
-	async function cancelRecording() {
+	/** One of the backend commands that answer a notice; the window goes away with the answer. */
+	async function answer(action: () => Promise<void>, what: string) {
 		if (busy) return
 		setBusy(true)
 		try {
-			await cancelAutoRecording()
+			await action()
 			setState(null)
 		} catch (error) {
-			console.error('Failed to cancel the automatic recording:', error)
-		} finally {
+			console.error(`Failed to ${what}:`, error)
 			setBusy(false)
 		}
 	}
+
+	const chooseScope = (scope: RecordingScope) => answer(() => chooseRecordingScope(scope), 'choose where the transcript goes')
+	const cancelRecording = () => answer(cancelAutoRecording, 'cancel the automatic recording')
+	const keepGoing = () => answer(continueAutoRecording, 'keep the automatic recording going')
+	const stopNow = () => answer(stopAutoRecording, 'stop the automatic recording')
 
 	function toggleSource(source: keyof MeetingRecordingOptions) {
 		setSources((current) => {
@@ -204,26 +283,55 @@ export default function MeetingPromptWindow() {
 
 	if (!state) return null
 
+	const buttonClass = 'h-8 rounded-md px-2.5 text-xs'
+
 	if (state.mode === 'recording') {
+		const remaining = Math.max(0, CHOICE_IDLE_MS + CHOICE_COUNTDOWN_MS - elapsed)
+		const countingDown = elapsed >= CHOICE_IDLE_MS
+		const seconds = String(Math.ceil(remaining / 1000))
+		const description = !countingDown
+			? m.meetingPromptRecordingDescription()
+			: unchosen === 'discard'
+				? m.meetingPromptUnchosenDiscard({ seconds })
+				: m.meetingPromptUnchosenPersonal({ seconds })
 		return (
 			<div className="flex h-screen w-screen items-center justify-center bg-transparent p-2">
 				<section className="flex h-full w-full flex-col gap-2 rounded-xl border border-border/70 bg-card px-3 py-2.5 text-card-foreground shadow-xl">
-					<div className="flex min-w-0 items-center gap-2.5">
-						<div className="relative flex h-9 w-12 shrink-0 items-center">
-							<ServiceIcon source={state.source} />
-							<img src={logoUrl} alt="" className="absolute end-0 h-5 w-5 rounded-full border-2 border-card" />
-						</div>
-						<div className="min-w-0">
-							<h1 className="truncate text-sm font-semibold leading-5">{m.meetingPromptRecordingTitle({ source: serviceNames[state.source] })}</h1>
-							<p className="truncate text-xs text-muted-foreground">{m.meetingPromptRecordingDescription()}</p>
-						</div>
-					</div>
+					<Header source={state.source} title={m.meetingPromptRecordingTitle({ source: serviceNames[state.source] })} description={description} />
+					{countingDown && <Countdown fraction={remaining / CHOICE_COUNTDOWN_MS} />}
 					<div className="mt-auto flex justify-end gap-1.5 border-t border-border/55 pt-2">
-						<Button type="button" variant="ghost" size="sm" className="h-7 rounded-md px-2 text-xs" disabled={busy} onClick={() => void dismiss()}>
-							{m.meetingPromptKeepRecording()}
-						</Button>
-						<Button type="button" variant="outline" size="sm" className="h-8 rounded-md px-3 text-xs" disabled={busy} onClick={() => void cancelRecording()}>
+						<Button type="button" variant="ghost" size="sm" className={buttonClass} disabled={busy} onClick={() => void cancelRecording()}>
 							{m.meetingPromptDontRecord()}
+						</Button>
+						<Button type="button" variant="outline" size="sm" className={buttonClass} disabled={busy} onClick={() => void chooseScope('personal')}>
+							{m.meetingPromptScopePersonal()}
+						</Button>
+						<Button type="button" size="sm" className={buttonClass} disabled={busy} onClick={() => void chooseScope('shared')}>
+							{sharedLabel}
+						</Button>
+					</div>
+				</section>
+			</div>
+		)
+	}
+
+	if (state.mode === 'ending') {
+		const remaining = Math.max(0, END_GRACE_MS - elapsed)
+		return (
+			<div className="flex h-screen w-screen items-center justify-center bg-transparent p-2">
+				<section className="flex h-full w-full flex-col gap-2 rounded-xl border border-border/70 bg-card px-3 py-2.5 text-card-foreground shadow-xl">
+					<Header
+						source={state.source}
+						title={m.meetingPromptEndingTitle({ source: serviceNames[state.source] })}
+						description={m.meetingPromptEndingDescription({ seconds: String(Math.ceil(remaining / 1000)) })}
+					/>
+					<Countdown fraction={remaining / END_GRACE_MS} />
+					<div className="mt-auto flex justify-end gap-1.5 border-t border-border/55 pt-2">
+						<Button type="button" variant="ghost" size="sm" className={buttonClass} disabled={busy} onClick={() => void keepGoing()}>
+							{m.meetingPromptKeepGoing()}
+						</Button>
+						<Button type="button" size="sm" className={buttonClass} disabled={busy} onClick={() => void stopNow()}>
+							{m.meetingPromptStopNow()}
 						</Button>
 					</div>
 				</section>
@@ -234,16 +342,7 @@ export default function MeetingPromptWindow() {
 	return (
 		<div className="flex h-screen w-screen items-center justify-center bg-transparent p-2">
 			<section className="flex h-full w-full flex-col gap-2 rounded-xl border border-border/70 bg-card px-3 py-2.5 text-card-foreground shadow-xl">
-				<div className="flex min-w-0 items-center gap-2.5">
-					<div className="relative flex h-9 w-12 shrink-0 items-center">
-						<ServiceIcon source={state.source} />
-						<img src={logoUrl} alt="" className="absolute end-0 h-5 w-5 rounded-full border-2 border-card" />
-					</div>
-					<div className="min-w-0">
-						<h1 className="truncate text-sm font-semibold leading-5">{m.meetingPromptTitle({ source: serviceNames[state.source] })}</h1>
-						<p className="truncate text-xs text-muted-foreground">{m.meetingPromptDescription()}</p>
-					</div>
-				</div>
+				<Header source={state.source} title={m.meetingPromptTitle({ source: serviceNames[state.source] })} description={m.meetingPromptDescription()} />
 				<div className="flex gap-1.5" aria-label={m.recordingControls()}>
 					<SourceChoice checked={sources.microphone} icon={Mic} label={m.microphone()} disabled={busy} onClick={() => toggleSource('microphone')} />
 					<SourceChoice

@@ -4,6 +4,7 @@ import { load } from '@tauri-apps/plugin-store'
 import * as config from '~/lib/config'
 import { DEFAULT_AUTO_EXPORT, type AutoExportSettings } from '~/lib/auto-export'
 import { CONFIG_KEYS } from '~/lib/config-keys'
+import type { UnchosenScope } from '~/lib/meeting-prompt'
 import { KEEP_AWAKE, startKeepAwake, stopKeepAwake } from '~/lib/keep-awake'
 import { usePersisted } from '~/lib/config-store'
 import { TextFormat } from '~/components/format-select'
@@ -137,6 +138,15 @@ export interface Preference {
 	setMeetingDetectionEnabled: ModifyState<boolean>
 	autoRecordDetectedMeetings: boolean
 	setAutoRecordDetectedMeetings: ModifyState<boolean>
+	/** What an automatic recording becomes when nobody chose on its notice. */
+	autoRecordUnchosenScope: UnchosenScope
+	setAutoRecordUnchosenScope: ModifyState<UnchosenScope>
+	/** Name of the shared choice on the recording notice (a team's name, say); empty = the default label. */
+	sharedScopeLabel: string
+	setSharedScopeLabel: ModifyState<string>
+	/** Where "personal" meeting transcripts are exported; null = the projects folder. */
+	personalExportFolder: string | null
+	setPersonalExportFolder: ModifyState<string | null>
 	autoTranscribeAfterRecording: boolean
 	setAutoTranscribeAfterRecording: ModifyState<boolean>
 }
@@ -276,6 +286,9 @@ export function PreferenceProvider({ children }: { children: ReactNode }) {
 	const [saveTranscripts, setSaveTranscripts] = usePersisted<boolean>(CONFIG_KEYS.saveTranscripts, true)
 	const [meetingDetectionEnabled, setMeetingDetectionEnabled] = usePersisted<boolean>(CONFIG_KEYS.meetingDetectionEnabled, false)
 	const [autoRecordDetectedMeetings, setAutoRecordDetectedMeetings] = usePersisted<boolean>(CONFIG_KEYS.autoRecordDetectedMeetings, false)
+	const [autoRecordUnchosenScope, setAutoRecordUnchosenScope] = usePersisted<UnchosenScope>(CONFIG_KEYS.autoRecordUnchosenScope, 'personal')
+	const [sharedScopeLabel, setSharedScopeLabel] = usePersisted<string>(CONFIG_KEYS.sharedScopeLabel, '')
+	const [personalExportFolder, setPersonalExportFolder] = usePersisted<string | null>(CONFIG_KEYS.personalExportFolder, null)
 	const [autoTranscribeAfterRecording, setAutoTranscribeAfterRecording] = usePersisted<boolean>(CONFIG_KEYS.autoTranscribeAfterRecording, false)
 
 	const [analyticsEnabled, setAnalyticsEnabledLocal] = useState(true)
@@ -470,6 +483,12 @@ export function PreferenceProvider({ children }: { children: ReactNode }) {
 		setMeetingDetectionEnabled,
 		autoRecordDetectedMeetings,
 		setAutoRecordDetectedMeetings,
+		autoRecordUnchosenScope,
+		setAutoRecordUnchosenScope,
+		sharedScopeLabel,
+		setSharedScopeLabel,
+		personalExportFolder,
+		setPersonalExportFolder,
 		autoTranscribeAfterRecording,
 		setAutoTranscribeAfterRecording,
 	}

@@ -49,6 +49,12 @@ export const CONFIG_KEYS = {
 	meetingDetectionEnabled: 'recording.meetingDetectionEnabled',
 	/** Start recording a detected meeting at once (with a way to cancel) instead of asking first. */
 	autoRecordDetectedMeetings: 'recording.autoRecordDetectedMeetings',
+	/** What an automatic recording becomes when nobody chose on its notice: 'personal' or 'discard'. */
+	autoRecordUnchosenScope: 'recording.autoRecordUnchosenScope',
+	/** Name of the shared choice on the recording notice, e.g. a team's name; empty = the default label. */
+	sharedScopeLabel: 'recording.sharedScopeLabel',
+	/** Where "personal" meeting transcripts are exported; null = the projects folder. */
+	personalExportFolder: 'transcription.personalExportFolder',
 	autoTranscribeAfterRecording: 'recording.autoTranscribeAfterRecording',
 
 	// Reading the transcript

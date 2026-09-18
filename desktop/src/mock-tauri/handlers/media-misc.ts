@@ -24,7 +24,7 @@ const YTDLP_TICK_MS = 100
 // Module-level mock state (survives across invokes for the lifetime of the page).
 let dictationIndicatorEnabled = false
 let meetingDetectionEnabled = false
-let meetingPromptState: { source: 'meet' | 'zoom' | 'teams'; mode: 'ask' | 'recording' } | null = null
+let meetingPromptState: { source: 'meet' | 'zoom' | 'teams'; mode: 'ask' | 'recording' | 'ending' } | null = null
 
 function sleep(ms: number) {
 	return new Promise<void>((resolve) => setTimeout(resolve, ms))
@@ -234,5 +234,15 @@ export const mediaMiscHandlers: CommandHandlerMap = {
 	cancel_auto_recording: () => {
 		meetingPromptState = null
 	},
+	choose_recording_scope: () => {
+		meetingPromptState = null
+	},
+	continue_auto_recording: () => {
+		meetingPromptState = null
+	},
+	stop_auto_recording: () => {
+		meetingPromptState = null
+	},
+	take_finished_auto_recording: () => null,
 	meeting_prompt_ready: () => undefined,
 }

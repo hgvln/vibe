@@ -9,7 +9,8 @@ import { trackGpuOutOfMemory, trackTranscribeCancelled, trackTranscribeFailed, t
 import * as config from '~/lib/config'
 import { KEEP_AWAKE, startKeepAwake, stopKeepAwake } from '~/lib/keep-awake'
 import { validPath } from '~/lib/media'
-import { exportTranscript, sharedFolder, summarizeResults, tauriExportIo, type AutoExportResult } from '~/lib/auto-export'
+import { exportTranscript, sharedFolder, summarizeResults, tauriExportIo, type AutoExportResult, type AutoExportSettings } from '~/lib/auto-export'
+import type { RecordingScope } from '~/lib/meeting-prompt'
 import { openPath } from '~/lib/app'
 import { notify } from '~/lib/notify'
 import { autoProjectName } from '~/lib/project-name'
@@ -67,6 +68,8 @@ export interface Job {
 	speakerNames?: SpeakerNames
 	/** What auto-export did with this transcript, when it ran. */
 	exported?: AutoExportResult
+	/** Where an automatic meeting recording's transcript goes; unset = the auto-export destination. */
+	exportScope?: RecordingScope
 }
 
 /** A run of two or more files: what batch users watch instead of the transcripts. */
@@ -108,7 +111,13 @@ export interface TranscribeQueue {
 	 * `audioPath` is the media copy kept in the project folder, when it still has one; it becomes the
 	 * job's path so the player keeps working after the original file moved away.
 	 */
-	hydrate: (record: TranscriptRecord, savedPath: string, audioPath?: string | null, source?: ProjectSource) => string | null
+	hydrate: (
+		record: TranscriptRecord,
+		savedPath: string,
+		audioPath?: string | null,
+		source?: ProjectSource,
+		exportScope?: RecordingScope,
+	) => string | null
 	/** Inline edit of one segment's text. Persists to the job's saved file when it has one. */
 	updateSegmentText: (jobId: string, segmentIndex: number, text: string) => void
 	/** Rename the visible project and its persisted record, when one exists. */
@@ -300,9 +309,15 @@ export function useTranscribeQueue(): TranscribeQueue {
 		async (job: Job, segments: Segment[]): Promise<AutoExportResult | null> => {
 			const current = preferenceRef.current
 			if (!current.autoExport.enabled || segments.length === 0) return null
+			// A personal meeting recording never goes to the shared destination: its own folder, or
+			// the projects folder when none is set.
+			const settings: AutoExportSettings =
+				job.exportScope === 'personal'
+					? { ...current.autoExport, destination: current.personalExportFolder ? 'folder' : 'projects', folder: current.personalExportFolder }
+					: current.autoExport
 			const result = await exportTranscript(
 				{ name: job.name, path: job.path, segments, summary: job.summary, speakerNames: job.speakerNames },
-				current.autoExport,
+				settings,
 				{
 					direction: current.textAreaDirection,
 					theme: current.exportOptions.theme,
@@ -601,7 +616,7 @@ export function useTranscribeQueue(): TranscribeQueue {
 
 	/** Load a saved transcript as the whole session: one finished job the done view can render. */
 	const hydrate = useCallback(
-		(record: TranscriptRecord, savedPath: string, audioPath?: string | null, source?: ProjectSource) => {
+		(record: TranscriptRecord, savedPath: string, audioPath?: string | null, source?: ProjectSource, exportScope?: RecordingScope) => {
 			// Opening an older Recent while a run is active remains disallowed. A recording finish is
 			// different: its durable project must enter the session even if another job is running.
 			if (runningRef.current && source !== 'record') return null
@@ -620,6 +635,7 @@ export function useTranscribeQueue(): TranscribeQueue {
 				summary: record.summary,
 				thread: record.thread,
 				speakerNames: record.speakerNames,
+				exportScope,
 			}
 			pinnedRef.current = true
 			commit(runningRef.current ? [...jobsRef.current, job] : [job])

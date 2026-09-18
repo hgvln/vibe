@@ -282,6 +282,7 @@ pub async fn start_record(app_handle: AppHandle, devices: Vec<AudioDevice>, reco
 
         let intermediates = wav_paths.into_iter().map(|(path, _)| path).chain(std::iter::once(dst));
         remove_recording_intermediates(intermediates, &output);
+        crate::meeting_prompt::recording_stopped(&app_handle_clone);
         app_handle_clone
             .emit(
                 "record_finish",
@@ -293,7 +294,6 @@ pub async fn start_record(app_handle: AppHandle, devices: Vec<AudioDevice>, reco
             )
             .map_err(|e| eyre!("{e:?}"))
             .log_error();
-        crate::meeting_prompt::recording_stopped(&app_handle_clone);
     });
 
     crate::meeting_prompt::recording_started(&app_handle);

@@ -9,6 +9,7 @@ import { toast } from 'sonner'
 import { m } from '~/paraglide/messages.js'
 import * as config from '~/lib/config'
 import { pathToNamedPath } from '~/lib/fs'
+import { takeFinishedAutoRecording, type RecordingScope } from '~/lib/meeting-prompt'
 import { cleanupPartialDownloads, listInstalledModels, type InstalledModel } from '~/lib/model'
 import { autoProjectName } from '~/lib/project-name'
 import { notifyTranscriptsChanged, saveTranscript, TRANSCRIPT_VERSION, type TranscriptRecord } from '~/lib/transcripts-store'
@@ -174,15 +175,24 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 			if (hotkeyRecordingActive) return
 			recording.setIsRecording(false)
 			setPanel('none')
-			if (discardNextRecordingRef.current) {
-				discardNextRecordingRef.current = false
+			const { preference: current, hydrate, transcribeJob } = recordingCompletionRef.current
+			// A recording that started on its own carries the choice made on its notice, if any;
+			// without one, the setting decides between keeping it as personal and discarding it.
+			const finished = await takeFinishedAutoRecording().catch((error) => {
+				console.error('Failed to read the outcome of the automatic recording:', error)
+				return null
+			})
+			const unchosenDiscard = finished !== null && finished.scope === null && current.autoRecordUnchosenScope === 'discard'
+			const exportScope: RecordingScope | undefined = finished ? (finished.scope ?? 'personal') : undefined
+			const discard = discardNextRecordingRef.current || unchosenDiscard
+			discardNextRecordingRef.current = false
+			if (discard) {
 				await remove(payload.path).catch((error) => console.error('Failed to discard the cancelled recording:', error))
 				toast.info(m.recordingDiscarded(), { position: 'bottom-center' })
 				return
 			}
 			if (payload.warning) toast.warning(m.recordingRecoveredWarning(), { description: payload.warning, position: 'bottom-center' })
 
-			const { preference: current, hydrate, transcribeJob } = recordingCompletionRef.current
 			const name = autoProjectName(payload.name, 'record')
 			const createdAt = new Date()
 			const saved = await saveTranscript({
@@ -211,7 +221,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 				modelPath: current.modelPath,
 				segments: [],
 			}
-			const jobId = hydrate(record, saved.recordPath, saved.mediaPath, 'record')
+			const jobId = hydrate(record, saved.recordPath, saved.mediaPath, 'record', exportScope)
 			notifyTranscriptsChanged()
 			if (current.autoTranscribeAfterRecording && jobId) transcribeJob(jobId)
 		})
