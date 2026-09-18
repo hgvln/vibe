@@ -133,10 +133,7 @@ fn decode_windows_executable_key(key: &str) -> String {
 /// consent store reported. Owners that are not browsers, and browsers no process matches, pass
 /// through untouched.
 #[cfg(any(target_os = "windows", test))]
-fn expand_browser_pids(
-    processes: Vec<crate::ProcessInfo>,
-    pids_for: impl Fn(&str) -> Vec<u32>,
-) -> Vec<crate::ProcessInfo> {
+fn expand_browser_pids(processes: Vec<crate::ProcessInfo>, pids_for: impl Fn(&str) -> Vec<u32>) -> Vec<crate::ProcessInfo> {
     let mut expanded = Vec::with_capacity(processes.len());
     for owner in processes {
         let executable = owner
