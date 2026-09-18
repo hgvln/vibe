@@ -100,9 +100,9 @@ function PermissionRow({ kind, label, description }: { kind: PermissionKind; lab
 }
 
 /**
- * Google Meet is recognised by reading the browser's window title, which macOS gates behind Screen
- * Recording. Zoom and Teams come from the process list and work without it, so this never blocks
- * the feature — it says which half is missing, and offers the one place that can fix it.
+ * Google Meet and Cal Video are recognised by reading the browser's window title, which macOS gates
+ * behind Screen Recording. Zoom and Teams come from the process list and work without it, so this
+ * never blocks the feature — it says which half is missing, and offers the one place that can fix it.
  */
 function MeetPermissionRow({ enabled }: { enabled: boolean }) {
 	const [status, setStatus] = useState<PermissionStatus | null>(null)

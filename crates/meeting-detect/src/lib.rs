@@ -35,6 +35,15 @@ pub enum Source {
     Zoom,
     Teams,
     Meet,
+    /// Cal.com's built-in conferencing, which runs in a browser tab like Meet.
+    CalVideo,
+}
+
+impl Source {
+    /// Whether this source is recognised by a browser window title rather than a process.
+    fn in_browser(self) -> bool {
+        matches!(self, Source::Meet | Source::CalVideo)
+    }
 }
 
 /// One snapshot of the current meeting signal.
@@ -79,7 +88,8 @@ pub(crate) struct MicUsage {
 /// Whether the OS lets this app read other windows' titles — how a browser meeting is recognised.
 ///
 /// Only macOS gates this, behind Screen Recording. Zoom and Teams are found through the process
-/// list instead, so they keep working either way; it is Google Meet that goes quiet without it.
+/// list instead, so they keep working either way; it is the browser meetings — Google Meet and
+/// Cal Video — that go quiet without it.
 pub fn screen_recording_granted() -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -112,11 +122,11 @@ pub fn detect() -> MeetingState {
 struct DetectionSnapshot {
     state: MeetingState,
     mic_active: bool,
-    /// Whether a browser that could be hosting Meet is still running and a microphone candidate.
+    /// Whether a browser that could be hosting a meeting is still running and a microphone candidate.
     browser_present: bool,
 }
 
-/// `scan_titles` enables the browser window-title lookup that identifies Meet. Callers that already
+/// `scan_titles` enables the browser window-title lookup that identifies Meet and Cal Video. Callers that already
 /// know the answer, or that are willing to wait for the next scan, pass `false` to skip the most
 /// expensive part of a poll.
 fn poll(scan_titles: bool) -> DetectionSnapshot {
@@ -165,8 +175,10 @@ fn classify_active(processes: Vec<ProcessInfo>, scan_titles: bool) -> MeetingSta
         .filter(|info| process::source(info) == Some(ProcessKind::Browser))
         .cloned()
         .collect();
-    if !browsers.is_empty() && window_title::meet_process(&browsers).is_some() {
-        return attributed(Source::Meet);
+    if !browsers.is_empty() {
+        if let Some((_, source)) = window_title::meeting_process(&browsers) {
+            return attributed(source);
+        }
     }
 
     MeetingState::inactive()
@@ -254,8 +266,8 @@ impl Default for Debounce {
 /// closed — quitting the call clears the state promptly. Only losing the attribution *while* the
 /// microphone stays open is held for roughly five seconds. Polling speeds up on its own while the
 /// signal is unsettled, so `interval` is the idle cadence rather than the detection latency. Once
-/// Meet is confirmed, transient title loss does not downgrade it while the same browser keeps the
-/// microphone session open.
+/// a browser meeting is confirmed, transient title loss does not downgrade it while the same
+/// browser keeps the microphone session open.
 pub fn watch(interval: Duration) -> Watcher {
     watch_with(interval, Debounce::default(), poll)
 }
@@ -272,18 +284,18 @@ where
         let mut emitted: Option<MeetingState> = None;
         let mut mic_active = false;
         let mut candidate: Option<(MeetingState, Instant)> = None;
-        // Set only when a Meet state is actually emitted. A one-poll title match must pass the
-        // debounce before it earns the sticky behavior.
-        let mut hold_meet = false;
+        // Set only when a browser meeting is actually emitted. A one-poll title match must pass
+        // the debounce before it earns the sticky behavior.
+        let mut held: Option<Source> = None;
         let mut last_title_scan: Option<Instant> = None;
         // The first poll always scans, and so does any poll taken while the signal is in motion.
         let mut unsettled = true;
 
         loop {
-            // Skipping the window scan while Meet is held costs nothing: the hold below overrides
-            // whatever the scan would have returned for the rest of this microphone session.
+            // Skipping the window scan while a meeting is held costs nothing: the hold below
+            // overrides whatever the scan would have returned for the rest of this microphone session.
             let scan_titles =
-                !hold_meet && (unsettled || last_title_scan.is_none_or(|scanned| scanned.elapsed() >= TITLE_SCAN_INTERVAL));
+                held.is_none() && (unsettled || last_title_scan.is_none_or(|scanned| scanned.elapsed() >= TITLE_SCAN_INTERVAL));
             let snapshot = poll(scan_titles);
             if scan_titles {
                 last_title_scan = Some(Instant::now());
@@ -293,22 +305,23 @@ where
             let mic_changed = snapshot.mic_active != mic_active;
             mic_active = snapshot.mic_active;
             let mut next = snapshot.state;
-            // A browser can stop exposing the Meet title as soon as the user switches tabs. Once
-            // Meet has survived the debounce, retain that attribution until the mic is released or
-            // the browser itself goes away — quitting the browser must not strand the prompt.
-            if snapshot.mic_active && snapshot.browser_present && hold_meet {
-                next = attributed(Source::Meet);
+            // A browser can stop exposing the meeting title as soon as the user switches tabs. Once
+            // a browser meeting has survived the debounce, retain that attribution until the mic is
+            // released or the browser itself goes away — quitting the browser must not strand the
+            // prompt.
+            if let Some(source) = held.filter(|_| snapshot.mic_active && snapshot.browser_present) {
+                next = attributed(source);
             }
 
             if !snapshot.mic_active || !snapshot.browser_present {
-                hold_meet = false;
+                held = None;
             }
 
             if emitted.is_none() {
                 if sender.send(next.clone()).is_err() {
                     break;
                 }
-                update_meet_hold(&next, &mut hold_meet);
+                update_browser_hold(&next, &mut held);
                 emitted = Some(next);
                 candidate = None;
             } else if emitted.as_ref() == Some(&next) {
@@ -320,7 +333,7 @@ where
                             if sender.send(next.clone()).is_err() {
                                 break;
                             }
-                            update_meet_hold(&next, &mut hold_meet);
+                            update_browser_hold(&next, &mut held);
                             emitted = Some(next);
                             candidate = None;
                         }
@@ -344,11 +357,11 @@ where
     }
 }
 
-fn update_meet_hold(state: &MeetingState, hold_meet: &mut bool) {
+fn update_browser_hold(state: &MeetingState, held: &mut Option<Source>) {
     if !state.recording {
-        *hold_meet = false;
-    } else if state.source == Some(Source::Meet) {
-        *hold_meet = true;
+        *held = None;
+    } else if let Some(source) = state.source.filter(|source| source.in_browser()) {
+        *held = Some(source);
     }
 }
 

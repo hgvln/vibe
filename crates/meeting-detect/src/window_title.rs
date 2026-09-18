@@ -1,7 +1,8 @@
-use crate::ProcessInfo;
+use crate::{ProcessInfo, Source};
 
-pub(crate) fn meet_process(browsers: &[ProcessInfo]) -> Option<ProcessInfo> {
-    platform::meet_process(browsers)
+/// The browser hosting a meeting, and which meeting it is, found by window title.
+pub(crate) fn meeting_process(browsers: &[ProcessInfo]) -> Option<(ProcessInfo, Source)> {
+    platform::meeting_process(browsers)
 }
 
 #[cfg(target_os = "macos")]
@@ -12,24 +13,38 @@ pub(crate) fn is_meet_title(title: &str) -> bool {
     title == "Google Meet" || title.starts_with("Meet – ") || title.starts_with("Meet - ")
 }
 
-fn matching_browser(browsers: &[ProcessInfo], pid: u32, title: &str) -> Option<ProcessInfo> {
-    if !is_meet_title(title) {
-        return None;
+/// Cal Video titles its meeting page "Cal.com Video"; on Windows the browser appends its own name.
+pub(crate) fn is_cal_video_title(title: &str) -> bool {
+    title.trim().starts_with("Cal.com Video")
+}
+
+fn source_for_title(title: &str) -> Option<Source> {
+    if is_meet_title(title) {
+        Some(Source::Meet)
+    } else if is_cal_video_title(title) {
+        Some(Source::CalVideo)
+    } else {
+        None
     }
-    browsers.iter().find(|browser| browser.pid == Some(pid)).cloned()
+}
+
+fn matching_browser(browsers: &[ProcessInfo], pid: u32, title: &str) -> Option<(ProcessInfo, Source)> {
+    let source = source_for_title(title)?;
+    let browser = browsers.iter().find(|browser| browser.pid == Some(pid)).cloned()?;
+    Some((browser, source))
 }
 
 #[cfg(target_os = "windows")]
 mod platform {
     use super::matching_browser;
-    use crate::ProcessInfo;
+    use crate::{ProcessInfo, Source};
     use windows::core::BOOL;
     use windows::Win32::Foundation::{HWND, LPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible};
 
     struct Search<'a> {
         browsers: &'a [ProcessInfo],
-        found: Option<ProcessInfo>,
+        found: Option<(ProcessInfo, Source)>,
     }
 
     unsafe extern "system" fn inspect_window(window: HWND, parameter: LPARAM) -> BOOL {
@@ -59,7 +74,7 @@ mod platform {
         }
     }
 
-    pub(super) fn meet_process(browsers: &[ProcessInfo]) -> Option<ProcessInfo> {
+    pub(super) fn meeting_process(browsers: &[ProcessInfo]) -> Option<(ProcessInfo, Source)> {
         let mut search = Search { browsers, found: None };
         let parameter = LPARAM((&mut search as *mut Search<'_>) as isize);
         // Stopping enumeration after a match reports an error, so the result itself is intentionally
@@ -72,7 +87,7 @@ mod platform {
 #[cfg(target_os = "linux")]
 mod platform {
     use super::matching_browser;
-    use crate::ProcessInfo;
+    use crate::{ProcessInfo, Source};
     use x11rb::connection::Connection;
     use x11rb::protocol::xproto::{Atom, AtomEnum, ConnectionExt, Window};
 
@@ -124,7 +139,7 @@ mod platform {
         Some(reply.value.into_iter().map(char::from).collect())
     }
 
-    pub(super) fn meet_process(browsers: &[ProcessInfo]) -> Option<ProcessInfo> {
+    pub(super) fn meeting_process(browsers: &[ProcessInfo]) -> Option<(ProcessInfo, Source)> {
         if browsers.is_empty() || environment_is_wayland() {
             return None;
         }
@@ -149,8 +164,8 @@ mod platform {
             let title = property(&connection, window, name_atom, utf8_string)
                 .and_then(utf8_title)
                 .or_else(|| property(&connection, window, AtomEnum::WM_NAME.into(), AtomEnum::ANY.into()).and_then(legacy_title));
-            if let Some(browser) = title.and_then(|title| matching_browser(browsers, pid, &title)) {
-                return Some(browser);
+            if let Some(found) = title.and_then(|title| matching_browser(browsers, pid, &title)) {
+                return Some(found);
             }
         }
         None
@@ -160,7 +175,7 @@ mod platform {
 #[cfg(target_os = "macos")]
 mod platform {
     use super::matching_browser;
-    use crate::ProcessInfo;
+    use crate::{ProcessInfo, Source};
     use core_foundation::base::{CFType, TCFType};
     use core_foundation::dictionary::CFDictionary;
     use core_foundation::number::CFNumber;
@@ -198,14 +213,14 @@ mod platform {
         ScreenCaptureAccess.request()
     }
 
-    pub(super) fn meet_process(browsers: &[ProcessInfo]) -> Option<ProcessInfo> {
+    pub(super) fn meeting_process(browsers: &[ProcessInfo]) -> Option<(ProcessInfo, Source)> {
         if browsers.is_empty() {
             return None;
         }
         if !ScreenCaptureAccess.preflight() {
             // Without this permission the window list comes back with no titles at all, which is
             // indistinguishable from "no meeting" — so say it out loud rather than return silence.
-            tracing::warn!("screen recording permission missing; Google Meet cannot be detected");
+            tracing::warn!("screen recording permission missing; Google Meet and Cal Video cannot be detected");
             return None;
         }
 
@@ -221,8 +236,8 @@ mod platform {
             let Some((pid, title)) = window_identity(&dictionary) else {
                 continue;
             };
-            if let Some(browser) = matching_browser(browsers, pid, &title) {
-                return Some(browser);
+            if let Some(found) = matching_browser(browsers, pid, &title) {
+                return Some(found);
             }
         }
         None
@@ -231,9 +246,9 @@ mod platform {
 
 #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 mod platform {
-    use crate::ProcessInfo;
+    use crate::{ProcessInfo, Source};
 
-    pub(super) fn meet_process(_browsers: &[ProcessInfo]) -> Option<ProcessInfo> {
+    pub(super) fn meeting_process(_browsers: &[ProcessInfo]) -> Option<(ProcessInfo, Source)> {
         None
     }
 }
@@ -261,11 +276,27 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_cal_video_titles_with_or_without_the_browser_suffix() {
+        assert!(is_cal_video_title("Cal.com Video"));
+        assert!(is_cal_video_title("Cal.com Video - Google Chrome"));
+        assert!(is_cal_video_title("Cal.com Video – Brave"));
+        assert!(!is_cal_video_title("No meeting found | Cal.com"));
+        assert!(!is_cal_video_title("Cal.com | Scheduling"));
+        assert_eq!(source_for_title("Cal.com Video"), Some(Source::CalVideo));
+        assert_eq!(source_for_title("Meet – Daily standup"), Some(Source::Meet));
+        assert_eq!(source_for_title("Inbox"), None);
+    }
+
+    #[test]
     fn matches_only_a_supplied_browser_pid() {
         let browsers = [browser(Some(42), "chrome"), browser(None, "firefox")];
         assert_eq!(
             matching_browser(&browsers, 42, "Meet – Daily standup"),
-            Some(browsers[0].clone())
+            Some((browsers[0].clone(), Source::Meet))
+        );
+        assert_eq!(
+            matching_browser(&browsers, 42, "Cal.com Video - Google Chrome"),
+            Some((browsers[0].clone(), Source::CalVideo))
         );
         assert_eq!(matching_browser(&browsers, 7, "Google Meet"), None);
         assert_eq!(matching_browser(&browsers, 42, "Inbox"), None);

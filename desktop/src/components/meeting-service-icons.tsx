@@ -1,3 +1,4 @@
+import { Video } from 'lucide-react'
 import { ReactComponent as GoogleMeetMark } from '~/icons/google-meet.svg'
 import { ReactComponent as MicrosoftTeamsMark } from '~/icons/microsoft-teams.svg'
 import { ReactComponent as ZoomMark } from '~/icons/zoom.svg'
@@ -17,6 +18,11 @@ export function MicrosoftTeamsIcon({ className }: IconProps) {
 	return <MicrosoftTeamsMark aria-hidden="true" className={className} />
 }
 
+/** Cal Video has no brand mark of its own; a plain camera stands in. */
+export function CalVideoIcon({ className }: IconProps) {
+	return <Video aria-hidden="true" className={className} />
+}
+
 export function MeetingServiceIcons({ className, label }: IconProps & { label?: string }) {
 	return (
 		<div className={cn('flex flex-wrap items-center gap-2', className)} aria-label={label}>
@@ -24,6 +30,7 @@ export function MeetingServiceIcons({ className, label }: IconProps & { label?: 
 				{ name: 'Google Meet', Icon: GoogleMeetIcon },
 				{ name: 'Zoom', Icon: ZoomIcon },
 				{ name: 'Microsoft Teams', Icon: MicrosoftTeamsIcon },
+				{ name: 'Cal Video', Icon: CalVideoIcon },
 			].map(({ name, Icon }) => (
 				<span
 					key={name}
