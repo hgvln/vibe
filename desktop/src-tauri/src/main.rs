@@ -169,6 +169,7 @@ async fn main() -> Result<()> {
             meeting_prompt::set_meeting_detection_enabled,
             meeting_prompt::get_meeting_prompt_state,
             meeting_prompt::dismiss_meeting_prompt,
+            meeting_prompt::cancel_auto_recording,
             meeting_prompt::meeting_prompt_ready
         ])
         .build(tauri::generate_context!())

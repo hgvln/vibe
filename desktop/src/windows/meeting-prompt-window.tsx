@@ -7,6 +7,7 @@ import { Button } from '~/components/ui/button'
 import { CONFIG_KEYS } from '~/lib/config-keys'
 import { readConfig } from '~/lib/config-store'
 import {
+	cancelAutoRecording,
 	dismissMeetingPrompt,
 	getMeetingPromptState,
 	meetingPromptReady,
@@ -161,6 +162,20 @@ export default function MeetingPromptWindow() {
 		}
 	}
 
+	/** The recording started on its own; the user does not want it. */
+	async function cancelRecording() {
+		if (busy) return
+		setBusy(true)
+		try {
+			await cancelAutoRecording()
+			setState(null)
+		} catch (error) {
+			console.error('Failed to cancel the automatic recording:', error)
+		} finally {
+			setBusy(false)
+		}
+	}
+
 	function toggleSource(source: keyof MeetingRecordingOptions) {
 		setSources((current) => {
 			if (current[source] && Object.values(current).filter(Boolean).length === 1) return current
@@ -177,6 +192,33 @@ export default function MeetingPromptWindow() {
 	})
 
 	if (!state) return null
+
+	if (state.mode === 'recording') {
+		return (
+			<div className="flex h-screen w-screen items-center justify-center bg-transparent p-2">
+				<section className="flex h-full w-full flex-col gap-2 rounded-xl border border-border/70 bg-card px-3 py-2.5 text-card-foreground shadow-xl">
+					<div className="flex min-w-0 items-center gap-2.5">
+						<div className="relative flex h-9 w-12 shrink-0 items-center">
+							<ServiceIcon source={state.source} />
+							<img src={logoUrl} alt="" className="absolute end-0 h-5 w-5 rounded-full border-2 border-card" />
+						</div>
+						<div className="min-w-0">
+							<h1 className="truncate text-sm font-semibold leading-5">{m.meetingPromptRecordingTitle({ source: serviceNames[state.source] })}</h1>
+							<p className="truncate text-xs text-muted-foreground">{m.meetingPromptRecordingDescription()}</p>
+						</div>
+					</div>
+					<div className="mt-auto flex justify-end gap-1.5 border-t border-border/55 pt-2">
+						<Button type="button" variant="ghost" size="sm" className="h-7 rounded-md px-2 text-xs" disabled={busy} onClick={() => void dismiss()}>
+							{m.meetingPromptKeepRecording()}
+						</Button>
+						<Button type="button" variant="outline" size="sm" className="h-8 rounded-md px-3 text-xs" disabled={busy} onClick={() => void cancelRecording()}>
+							{m.meetingPromptDontRecord()}
+						</Button>
+					</div>
+				</section>
+			</div>
+		)
+	}
 
 	return (
 		<div className="flex h-screen w-screen items-center justify-center bg-transparent p-2">

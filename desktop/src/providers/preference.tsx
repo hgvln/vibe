@@ -135,6 +135,8 @@ export interface Preference {
 	/** Offer to start recording when a supported meeting app begins using the microphone. */
 	meetingDetectionEnabled: boolean
 	setMeetingDetectionEnabled: ModifyState<boolean>
+	autoRecordDetectedMeetings: boolean
+	setAutoRecordDetectedMeetings: ModifyState<boolean>
 	autoTranscribeAfterRecording: boolean
 	setAutoTranscribeAfterRecording: ModifyState<boolean>
 }
@@ -273,6 +275,7 @@ export function PreferenceProvider({ children }: { children: ReactNode }) {
 	const [cpuVariant, setCpuVariant] = usePersisted<CpuVariant>(CONFIG_KEYS.cpuVariant, 'auto')
 	const [saveTranscripts, setSaveTranscripts] = usePersisted<boolean>(CONFIG_KEYS.saveTranscripts, true)
 	const [meetingDetectionEnabled, setMeetingDetectionEnabled] = usePersisted<boolean>(CONFIG_KEYS.meetingDetectionEnabled, false)
+	const [autoRecordDetectedMeetings, setAutoRecordDetectedMeetings] = usePersisted<boolean>(CONFIG_KEYS.autoRecordDetectedMeetings, false)
 	const [autoTranscribeAfterRecording, setAutoTranscribeAfterRecording] = usePersisted<boolean>(CONFIG_KEYS.autoTranscribeAfterRecording, false)
 
 	const [analyticsEnabled, setAnalyticsEnabledLocal] = useState(true)
@@ -380,6 +383,7 @@ export function PreferenceProvider({ children }: { children: ReactNode }) {
 		setProjectsPath(null)
 		setAi(DEFAULT_AI)
 		setMeetingDetectionEnabled(false)
+		setAutoRecordDetectedMeetings(false)
 		setAutoTranscribeAfterRecording(false)
 		message(m.successAction())
 	}
@@ -464,6 +468,8 @@ export function PreferenceProvider({ children }: { children: ReactNode }) {
 		setSaveTranscripts,
 		meetingDetectionEnabled,
 		setMeetingDetectionEnabled,
+		autoRecordDetectedMeetings,
+		setAutoRecordDetectedMeetings,
 		autoTranscribeAfterRecording,
 		setAutoTranscribeAfterRecording,
 	}

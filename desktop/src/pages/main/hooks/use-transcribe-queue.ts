@@ -316,6 +316,11 @@ export function useTranscribeQueue(): TranscribeQueue {
 			)
 			patch(job.id, { exported: result })
 			runResultsRef.current.set(job.id, result)
+			// A recording usually finishes while the meeting window is still in front; say where the
+			// transcript went without waiting for anyone to come back to Vibe.
+			if (job.source === 'record' && (result.status === 'exported' || result.status === 'fallback')) {
+				void notify(m.transcriptReadyTitle(), m.transcriptReadyBody({ name: job.name, folder: result.folder }))
+			}
 			return result
 		},
 		[patch],

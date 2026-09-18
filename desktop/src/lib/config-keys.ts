@@ -47,6 +47,8 @@ export const CONFIG_KEYS = {
 	recordingShortcutEnabled: 'recording.shortcutEnabled',
 	recordingShortcut: 'recording.shortcut',
 	meetingDetectionEnabled: 'recording.meetingDetectionEnabled',
+	/** Start recording a detected meeting at once (with a way to cancel) instead of asking first. */
+	autoRecordDetectedMeetings: 'recording.autoRecordDetectedMeetings',
 	autoTranscribeAfterRecording: 'recording.autoTranscribeAfterRecording',
 
 	// Reading the transcript

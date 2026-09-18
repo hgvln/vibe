@@ -148,7 +148,14 @@ function MeetPermissionRow({ enabled }: { enabled: boolean }) {
 
 export function RecordingSection() {
 	const shortcut = useRecordingShortcut()
-	const { meetingDetectionEnabled, setMeetingDetectionEnabled, autoTranscribeAfterRecording, setAutoTranscribeAfterRecording } = usePreferenceProvider()
+	const {
+		meetingDetectionEnabled,
+		setMeetingDetectionEnabled,
+		autoRecordDetectedMeetings,
+		setAutoRecordDetectedMeetings,
+		autoTranscribeAfterRecording,
+		setAutoTranscribeAfterRecording,
+	} = usePreferenceProvider()
 	const isMacOS = platform() === 'macos'
 
 	return (
@@ -157,6 +164,11 @@ export function RecordingSection() {
 				<SettingsRow label={<MeetingServiceIcons label={m.supportedMeetingServices()} />} description={m.meetingDetectionInfo()}>
 					<Switch checked={meetingDetectionEnabled} onCheckedChange={setMeetingDetectionEnabled} aria-label={m.meetingDetection()} />
 				</SettingsRow>
+				{meetingDetectionEnabled && (
+					<SettingsRow label={m.autoRecordMeetings()} description={m.autoRecordMeetingsInfo()}>
+						<Switch checked={autoRecordDetectedMeetings} onCheckedChange={setAutoRecordDetectedMeetings} aria-label={m.autoRecordMeetings()} />
+					</SettingsRow>
+				)}
 				<MeetPermissionRow enabled={meetingDetectionEnabled} />
 			</SettingsGroup>
 

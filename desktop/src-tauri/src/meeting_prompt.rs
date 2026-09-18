@@ -4,7 +4,7 @@ use serde::Serialize;
 use std::sync::mpsc::{self, RecvTimeoutError, TryRecvError};
 use std::sync::Mutex;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::webview::PageLoadEvent;
 use tauri::{Emitter, LogicalSize, Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tauri_plugin_store::StoreExt;
@@ -29,7 +29,21 @@ tauri_nspanel::tauri_panel! {
 
 const WINDOW_LABEL: &str = "meeting-prompt";
 const ENABLED_KEY: &str = "recording.meetingDetectionEnabled";
+/// Opt-in: start recording as soon as a meeting is detected instead of asking first.
+const AUTO_RECORD_KEY: &str = "recording.autoRecordDetectedMeetings";
 const EVENT_NAME: &str = "meeting-prompt-state";
+/// The main window listens for this and starts a recording with the given sources — the same
+/// path the prompt's "Record" button takes.
+const START_RECORDING_EVENT: &str = "meeting-prompt-start-recording";
+/// Tells the main window that the recording being stopped was cancelled and must be discarded.
+const DISCARD_RECORDING_EVENT: &str = "meeting-auto-recording-discarded";
+/// A meeting that ends is reported after the detector's own debounce; this grace on top of it
+/// lets a dropped microphone that comes straight back keep one recording rather than two.
+const END_GRACE: Duration = Duration::from_secs(20);
+/// Safety net for a call the detector never sees end.
+const MAX_AUTO_RECORDING: Duration = Duration::from_secs(3 * 60 * 60);
+/// How long the main window gets to actually open the microphone after being asked to.
+const START_TIMEOUT: Duration = Duration::from_secs(15);
 const WIDTH: f64 = 304.0;
 const HEIGHT: f64 = 152.0;
 const MARGIN: f64 = 20.0;
@@ -41,9 +55,61 @@ const TOP_MARGIN: f64 = MARGIN;
 /// so a meeting surfaces within roughly a second of the call opening the microphone.
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
+/// What the prompt window shows: a question, or the notice that recording already started.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PromptMode {
+    Ask,
+    Recording,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct MeetingPromptPayload {
     pub source: Source,
+    pub mode: PromptMode,
+}
+
+/// Mirrors `MeetingRecordingOptions` on the frontend.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecordingOptions {
+    microphone: bool,
+    system_audio: bool,
+}
+
+/// A recording this module started on its own, so that it can also end it.
+#[derive(Clone, Copy, Debug)]
+struct AutoRecording {
+    source: Source,
+    requested_at: Instant,
+    /// Set once the main window confirmed the microphone is open.
+    started_at: Option<Instant>,
+    /// Set while the detector reports the meeting gone; cleared if it comes back within the grace.
+    ended_since: Option<Instant>,
+}
+
+impl AutoRecording {
+    fn new(source: Source) -> Self {
+        Self {
+            source,
+            requested_at: Instant::now(),
+            started_at: None,
+            ended_since: None,
+        }
+    }
+
+    /// Why this recording should stop now, if it should.
+    fn stop_reason(&self, now: Instant) -> Option<&'static str> {
+        match self.started_at {
+            None if now.duration_since(self.requested_at) >= START_TIMEOUT => Some("the recording never started"),
+            None => None,
+            Some(started_at) if now.duration_since(started_at) >= MAX_AUTO_RECORDING => Some("the maximum duration was reached"),
+            Some(_) => self
+                .ended_since
+                .filter(|since| now.duration_since(*since) >= END_GRACE)
+                .map(|_| "the meeting ended"),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -69,7 +135,10 @@ impl PromptLogic {
             self.current = self
                 .detected
                 .filter(|_| !self.dismissed && self.own_recordings == 0)
-                .map(|source| MeetingPromptPayload { source });
+                .map(|source| MeetingPromptPayload {
+                    source,
+                    mode: PromptMode::Ask,
+                });
         }
         before != self.current
     }
@@ -87,6 +156,14 @@ impl PromptLogic {
             self.dismissed = true;
         }
         self.current.take().is_some()
+    }
+
+    /// Automatic recording takes the place of the question for this microphone session.
+    fn suppress_question(&mut self) {
+        if self.detected.is_some() {
+            self.dismissed = true;
+        }
+        self.current = None;
     }
 
     fn recording_stopped(&mut self) {
@@ -130,6 +207,10 @@ impl Drop for Worker {
 struct RuntimeInner {
     logic: PromptLogic,
     worker: Option<Worker>,
+    auto: Option<AutoRecording>,
+    /// The user cancelled an automatic recording before the microphone opened: stop it as soon
+    /// as it does.
+    cancel_pending: bool,
 }
 
 #[derive(Default)]
@@ -137,12 +218,20 @@ pub struct MeetingPromptRuntime {
     inner: Mutex<RuntimeInner>,
 }
 
-fn is_enabled(app: &tauri::AppHandle) -> bool {
+fn store_flag(app: &tauri::AppHandle, key: &str) -> bool {
     app.store(STORE_FILENAME)
         .ok()
-        .and_then(|store| store.get(ENABLED_KEY))
+        .and_then(|store| store.get(key))
         .and_then(|value| value.as_bool())
         .unwrap_or(false)
+}
+
+fn is_enabled(app: &tauri::AppHandle) -> bool {
+    store_flag(app, ENABLED_KEY)
+}
+
+fn is_auto_record_enabled(app: &tauri::AppHandle) -> bool {
+    store_flag(app, AUTO_RECORD_KEY)
 }
 
 fn create_window(app: &tauri::AppHandle) -> Result<WebviewWindow, String> {
@@ -265,15 +354,36 @@ fn apply_detection(app: &tauri::AppHandle, state: MeetingState) {
     let Some(runtime) = app.try_state::<MeetingPromptRuntime>() else {
         return;
     };
-    let next = {
+    let auto_record = is_auto_record_enabled(app);
+    let (changed, next, start) = {
         let Ok(mut inner) = runtime.inner.lock() else {
             return;
         };
-        if !inner.logic.detection(state) {
-            return;
+        let changed = inner.logic.detection(state.clone());
+        // Bookkeeping for a recording this module started: the meeting going away starts the
+        // end-of-call grace; coming back within it cancels the stop.
+        if let Some(auto) = inner.auto.as_mut() {
+            if state.recording {
+                auto.ended_since = None;
+            } else {
+                auto.ended_since.get_or_insert_with(Instant::now);
+            }
         }
-        inner.logic.current.clone()
+        let start =
+            auto_record && state.recording && inner.auto.is_none() && inner.logic.own_recordings == 0 && !inner.logic.dismissed;
+        if let Some(source) = state.source.filter(|_| start) {
+            inner.auto = Some(AutoRecording::new(source));
+            inner.logic.suppress_question();
+        }
+        (changed, inner.logic.current.clone(), start.then_some(state.source).flatten())
     };
+    if let Some(source) = start {
+        start_auto_recording(app, source);
+        return;
+    }
+    if !changed {
+        return;
+    }
     match next {
         Some(state) => {
             if let Err(error) = show_state(app, state) {
@@ -281,6 +391,61 @@ fn apply_detection(app: &tauri::AppHandle, state: MeetingState) {
             }
         }
         None => hide_window(app),
+    }
+}
+
+fn start_auto_recording(app: &tauri::AppHandle, source: Source) {
+    tracing::info!(?source, "recording detected meeting automatically");
+    let options = RecordingOptions {
+        microphone: true,
+        system_audio: true,
+    };
+    if let Err(error) = app.emit(START_RECORDING_EVENT, options) {
+        tracing::error!("could not ask the main window to record: {error}");
+        clear_auto(app);
+        return;
+    }
+    let payload = MeetingPromptPayload {
+        source,
+        mode: PromptMode::Recording,
+    };
+    if let Err(error) = show_state(app, payload) {
+        tracing::error!("could not show the recording notice: {error}");
+    }
+}
+
+fn clear_auto(app: &tauri::AppHandle) -> Option<AutoRecording> {
+    let runtime = app.try_state::<MeetingPromptRuntime>()?;
+    let mut inner = runtime.inner.lock().ok()?;
+    inner.auto.take()
+}
+
+/// Called on every detector poll: ends an automatic recording whose meeting is over, that never
+/// started, or that has run for too long.
+fn tick_auto(app: &tauri::AppHandle) {
+    let Some(runtime) = app.try_state::<MeetingPromptRuntime>() else {
+        return;
+    };
+    let reason = {
+        let Ok(mut inner) = runtime.inner.lock() else {
+            return;
+        };
+        let now = Instant::now();
+        let Some(reason) = inner.auto.as_ref().and_then(|auto| auto.stop_reason(now)) else {
+            return;
+        };
+        let auto = inner.auto.take();
+        // A recording that never opened the microphone has nothing to stop.
+        auto.and_then(|auto| auto.started_at.map(|_| reason))
+    };
+    let Some(reason) = reason else {
+        tracing::warn!("automatic recording was requested but never started");
+        return;
+    };
+    tracing::info!("stopping automatic recording: {reason}");
+    hide_window(app);
+    if let Err(error) = app.emit("stop_record", ()) {
+        tracing::error!("could not stop the automatic recording: {error}");
     }
 }
 
@@ -309,6 +474,7 @@ fn start_worker(app: &tauri::AppHandle) -> Result<(), String> {
                     Err(RecvTimeoutError::Timeout) => {}
                     Err(RecvTimeoutError::Disconnected) => break,
                 }
+                tick_auto(&worker_app);
             }
             drop(detector);
         })
@@ -329,6 +495,9 @@ fn stop_worker(app: &tauri::AppHandle) -> Result<(), String> {
         // Keep Vibe's own recording count across a disable/re-enable cycle. Otherwise enabling
         // detection during an existing recording could prompt for Vibe's microphone session.
         inner.logic.reset_detection();
+        // An automatic recording in flight keeps going; without the detector nobody would end it,
+        // so it becomes an ordinary recording the user stops.
+        inner.auto = None;
         inner.worker.take()
     };
     if let Some(worker) = worker {
@@ -389,10 +558,40 @@ pub fn dismiss_meeting_prompt(app: tauri::AppHandle) -> Result<(), String> {
     let runtime = app
         .try_state::<MeetingPromptRuntime>()
         .ok_or_else(|| "meeting prompt runtime is not initialized".to_string())?;
-    if runtime.inner.lock().map_err(|error| error.to_string())?.logic.dismiss() {
-        hide_window(&app);
-    }
+    runtime.inner.lock().map_err(|error| error.to_string())?.logic.dismiss();
+    // The window may be showing the notice of an automatic recording, which is not a question
+    // the logic tracks; hiding an already hidden window costs nothing.
+    hide_window(&app);
     Ok(())
+}
+
+/// The user declined the recording that started on its own: stop it and throw the audio away.
+#[tauri::command]
+pub fn cancel_auto_recording(app: tauri::AppHandle) -> Result<(), String> {
+    let cancelled = clear_auto(&app);
+    if let Some(runtime) = app.try_state::<MeetingPromptRuntime>() {
+        if let Ok(mut inner) = runtime.inner.lock() {
+            inner.logic.suppress_question();
+        }
+    }
+    hide_window(&app);
+    let Some(auto) = cancelled else {
+        return Ok(());
+    };
+    tracing::info!(source = ?auto.source, "automatic recording cancelled by the user");
+    // Discard first, so the main window knows what the stop means before the finish arrives.
+    app.emit(DISCARD_RECORDING_EVENT, ()).map_err(|error| error.to_string())?;
+    if auto.started_at.is_none() {
+        // Nothing is recording yet, so there is nothing to stop; the main window may still be
+        // opening the microphone. Stop it the moment it reports in.
+        if let Some(runtime) = app.try_state::<MeetingPromptRuntime>() {
+            if let Ok(mut inner) = runtime.inner.lock() {
+                inner.cancel_pending = true;
+            }
+        }
+        return Ok(());
+    }
+    app.emit("stop_record", ()).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -413,13 +612,26 @@ pub fn recording_started(app: &tauri::AppHandle) {
     let Some(runtime) = app.try_state::<MeetingPromptRuntime>() else {
         return;
     };
-    let hide = runtime
+    let (hide, stop) = runtime
         .inner
         .lock()
-        .map(|mut inner| inner.logic.recording_started())
-        .unwrap_or(false);
+        .map(|mut inner| {
+            if let Some(auto) = inner.auto.as_mut() {
+                auto.started_at.get_or_insert_with(Instant::now);
+            }
+            let stop = std::mem::take(&mut inner.cancel_pending);
+            // The question hides when a recording starts; the notice of an automatic one stays.
+            (inner.logic.recording_started() && inner.auto.is_none(), stop)
+        })
+        .unwrap_or((false, false));
     if hide {
         hide_window(app);
+    }
+    if stop {
+        tracing::info!("stopping the automatic recording that was cancelled before it started");
+        if let Err(error) = app.emit("stop_record", ()) {
+            tracing::error!("could not stop the cancelled recording: {error}");
+        }
     }
 }
 
@@ -429,6 +641,7 @@ pub fn recording_stopped(app: &tauri::AppHandle) {
     };
     if let Ok(mut inner) = runtime.inner.lock() {
         inner.logic.recording_stopped();
+        inner.auto = None;
     };
 }
 
@@ -464,6 +677,40 @@ mod tests {
         state.recording_stopped();
         state.detection(zoom(true));
         assert!(state.current.is_none());
+        state.detection(zoom(false));
+        state.detection(zoom(true));
+        assert!(state.current.is_some());
+    }
+
+    #[test]
+    fn an_automatic_recording_stops_only_after_the_meeting_stayed_gone_for_the_grace() {
+        let t0 = Instant::now();
+        let mut auto = AutoRecording::new(Source::Meet);
+        assert_eq!(auto.stop_reason(t0), None);
+        assert_eq!(auto.stop_reason(t0 + START_TIMEOUT), Some("the recording never started"));
+        auto.started_at = Some(t0 + Duration::from_secs(1));
+        assert_eq!(auto.stop_reason(t0 + START_TIMEOUT), None);
+        auto.ended_since = Some(t0 + Duration::from_secs(60));
+        assert_eq!(auto.stop_reason(t0 + Duration::from_secs(70)), None);
+        assert_eq!(
+            auto.stop_reason(t0 + Duration::from_secs(60) + END_GRACE),
+            Some("the meeting ended")
+        );
+        auto.ended_since = None;
+        assert_eq!(
+            auto.stop_reason(t0 + Duration::from_secs(1) + MAX_AUTO_RECORDING),
+            Some("the maximum duration was reached")
+        );
+    }
+
+    #[test]
+    fn suppressing_the_question_dismisses_the_current_mic_session() {
+        let mut state = PromptLogic::default();
+        state.detection(zoom(true));
+        assert!(state.current.is_some());
+        state.suppress_question();
+        assert!(state.current.is_none());
+        assert!(!state.detection(zoom(true)));
         state.detection(zoom(false));
         state.detection(zoom(true));
         assert!(state.current.is_some());

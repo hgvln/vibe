@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { webviewWindow } from '@tauri-apps/api'
 import * as dialog from '@tauri-apps/plugin-dialog'
+import { remove } from '@tauri-apps/plugin-fs'
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
@@ -154,6 +155,18 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 		return () => window.clearInterval(timer)
 	}, [recording.isRecording])
 
+	// A meeting recording that started on its own and was declined: the stop that follows must
+	// throw the audio away instead of saving it.
+	const discardNextRecordingRef = useRef(false)
+	useEffect(() => {
+		const unlisten: Promise<UnlistenFn> = listen('meeting-auto-recording-discarded', () => {
+			discardNextRecordingRef.current = true
+		})
+		return () => {
+			unlisten.then((fn) => fn())
+		}
+	}, [])
+
 	// A recording becomes a durable project first. Transcription is an optional second step which
 	// updates that same project, so a failed/disabled transcription never costs the user the audio.
 	useEffect(() => {
@@ -161,6 +174,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 			if (hotkeyRecordingActive) return
 			recording.setIsRecording(false)
 			setPanel('none')
+			if (discardNextRecordingRef.current) {
+				discardNextRecordingRef.current = false
+				await remove(payload.path).catch((error) => console.error('Failed to discard the cancelled recording:', error))
+				toast.info(m.recordingDiscarded(), { position: 'bottom-center' })
+				return
+			}
 			if (payload.warning) toast.warning(m.recordingRecoveredWarning(), { description: payload.warning, position: 'bottom-center' })
 
 			const { preference: current, hydrate, transcribeJob } = recordingCompletionRef.current
