@@ -119,15 +119,26 @@ export default function MeetingPromptWindow() {
 		}
 	}, [])
 
+	// The main window reports back after the question's "Record": the question is done. The
+	// notice of an automatic recording is not a question and stays until it is dismissed.
 	useEffect(() => {
 		const unlisten = listen<{ started: boolean }>('meeting-prompt-recording-result', ({ payload }) => {
 			setBusy(false)
-			if (payload.started) setState(null)
+			if (payload.started) setState((current) => (current?.mode === 'recording' ? current : null))
 		})
 		return () => {
 			unlisten.then((dispose) => dispose())
 		}
 	}, [])
+
+	// The window is transparent and stays where it is once the content is gone; hide it with
+	// the content so it cannot sit invisibly over the meeting.
+	useEffect(() => {
+		if (state) return
+		void getCurrentWebviewWindow()
+			.hide()
+			.catch(() => undefined)
+	}, [state])
 
 	useEffect(() => {
 		if (!state) return
