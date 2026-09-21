@@ -388,18 +388,44 @@ fn hide_window(app: &tauri::AppHandle) {
     }
 }
 
+/// Positions the window on the monitor under the cursor, shows it and sends it its content.
+fn present(app: &tauri::AppHandle, window: &WebviewWindow, state: MeetingPromptPayload) -> Result<(), String> {
+    position_window(app, window)?;
+    show_window_without_focus(app, window)?;
+    repaint_after_show(window);
+    tracing::debug!(
+        visible = ?window.is_visible(),
+        position = ?window.outer_position(),
+        size = ?window.outer_size(),
+        scale = ?window.scale_factor(),
+        "meeting prompt window shown"
+    );
+    window.emit(EVENT_NAME, state).map_err(|error| error.to_string())
+}
+
+/// WebView2 leaves a never-activated window blank when it was resized while hidden, until it is
+/// resized again (MicrosoftEdge/WebView2Feedback#2983). Positioning the hidden window on a monitor
+/// with another scale factor is such a resize: it happens whenever the cursor is on the other
+/// screen of a mixed-DPI setup. Nudging the size once the window is visible makes it paint.
+#[cfg(target_os = "windows")]
+fn repaint_after_show(window: &WebviewWindow) {
+    let _ = window.set_size(LogicalSize::new(WIDTH, HEIGHT + 1.0));
+    let _ = window.set_size(LogicalSize::new(WIDTH, HEIGHT));
+}
+
+#[cfg(not(target_os = "windows"))]
+fn repaint_after_show(_window: &WebviewWindow) {}
+
 fn show_state(app: &tauri::AppHandle, state: MeetingPromptPayload) -> Result<(), String> {
     if !is_enabled(app) {
         return Ok(());
     }
-    tracing::debug!(source = ?state.source, "showing meeting prompt");
+    tracing::debug!(source = ?state.source, mode = ?state.mode, "showing meeting prompt");
     let window = match app.get_webview_window(WINDOW_LABEL) {
         Some(window) => window,
         None => create_window(app)?,
     };
-    position_window(app, &window)?;
-    show_window_without_focus(app, &window)?;
-    window.emit(EVENT_NAME, state).map_err(|error| error.to_string())
+    present(app, &window, state)
 }
 
 fn apply_detection(app: &tauri::AppHandle, state: MeetingState) {
@@ -751,9 +777,7 @@ pub fn meeting_prompt_ready(window: tauri::WebviewWindow) -> Result<(), String> 
     let app = window.app_handle();
     let state = get_meeting_prompt_state(app.clone())?;
     if let Some(state) = state {
-        position_window(app, &window)?;
-        show_window_without_focus(app, &window)?;
-        window.emit(EVENT_NAME, state).map_err(|error| error.to_string())?;
+        present(app, &window, state)?;
     } else {
         window.hide().map_err(|error| error.to_string())?;
     }
