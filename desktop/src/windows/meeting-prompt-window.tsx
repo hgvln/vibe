@@ -33,7 +33,7 @@ const CHOICE_IDLE_MS = 30_000
 /** ...then counts down this long, visibly, before the default applies. */
 const CHOICE_COUNTDOWN_MS = 15_000
 /** Mirrors END_GRACE in meeting_prompt.rs: the recording stops this long after the call ended. */
-const END_GRACE_MS = 10_000
+const END_GRACE_MS = 15_000
 
 const serviceNames: Record<MeetingSource, string> = {
 	meet: 'Google Meet',

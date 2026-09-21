@@ -11,6 +11,7 @@ import * as config from '~/lib/config'
 import { pathToNamedPath } from '~/lib/fs'
 import { takeFinishedAutoRecording, type RecordingScope } from '~/lib/meeting-prompt'
 import { cleanupPartialDownloads, listInstalledModels, type InstalledModel } from '~/lib/model'
+import { notify } from '~/lib/notify'
 import { autoProjectName } from '~/lib/project-name'
 import { notifyTranscriptsChanged, saveTranscript, TRANSCRIPT_VERSION, type TranscriptRecord } from '~/lib/transcripts-store'
 import type { NamedPath, ProjectSource } from '~/lib/types'
@@ -189,6 +190,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 			if (discard) {
 				await remove(payload.path).catch((error) => console.error('Failed to discard the cancelled recording:', error))
 				toast.info(m.recordingDiscarded(), { position: 'bottom-center' })
+				// The main window is usually in the tray while a meeting runs: say it where it can be seen.
+				void notify(m.recordingDiscarded(), m.autoRecordingDiscardedBody())
 				return
 			}
 			if (payload.warning) toast.warning(m.recordingRecoveredWarning(), { description: payload.warning, position: 'bottom-center' })

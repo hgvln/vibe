@@ -41,7 +41,7 @@ const DISCARD_RECORDING_EVENT: &str = "meeting-auto-recording-discarded";
 /// lets a dropped microphone that comes straight back keep one recording rather than two. The
 /// end-of-call question shows for this long: "stop" ends the recording at once, "keep going"
 /// waits for the meeting to come back.
-const END_GRACE: Duration = Duration::from_secs(10);
+const END_GRACE: Duration = Duration::from_secs(15);
 /// Safety net for a call the detector never sees end.
 const MAX_AUTO_RECORDING: Duration = Duration::from_secs(3 * 60 * 60);
 /// How long the main window gets to actually open the microphone after being asked to.
