@@ -90,6 +90,7 @@ winreg = "0.55.0"
 windows = { version = "0.62.2", features = [
 	"Win32_System_Console",
 	"Win32_Foundation",
+	"Win32_UI_WindowsAndMessaging",
 ] }
 # Used to redirect stdout/stderr from c++ to the attached console
 libc = "0.2.180"

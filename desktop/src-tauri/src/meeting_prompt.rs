@@ -56,6 +56,8 @@ const TOP_MARGIN: f64 = MARGIN;
 /// Idle cadence only. The detector polls itself faster while the microphone signal is changing,
 /// so a meeting surfaces within roughly a second of the call opening the microphone.
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// How often a prompt that stays up is put back in front of windows that opened over it.
+const RAISE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// What the prompt window shows: the question whether to record, the notice that a recording
 /// started on its own (and where its transcript should go), or the end-of-call question.
@@ -392,6 +394,7 @@ fn hide_window(app: &tauri::AppHandle) {
 fn present(app: &tauri::AppHandle, window: &WebviewWindow, state: MeetingPromptPayload) -> Result<(), String> {
     position_window(app, window)?;
     show_window_without_focus(app, window)?;
+    raise_to_top(window);
     repaint_after_show(window);
     tracing::debug!(
         visible = ?window.is_visible(),
@@ -415,6 +418,39 @@ fn repaint_after_show(window: &WebviewWindow) {
 
 #[cfg(not(target_os = "windows"))]
 fn repaint_after_show(_window: &WebviewWindow) {}
+
+/// The window is made topmost once, when it is created; showing it again later puts it back where
+/// it was among the other topmost windows, under any opened since — the browser's picture-in-picture
+/// of the call, typically. Putting it back at the top of that band on every show, and every second
+/// while it stays up, keeps the prompt in front of the meeting. It still never takes the focus.
+#[cfg(target_os = "windows")]
+fn raise_to_top(window: &WebviewWindow) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, HWND_TOPMOST, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    };
+    let Ok(hwnd) = window.hwnd() else {
+        return;
+    };
+    // Tauri hands out the HWND of its own version of the windows crate.
+    let hwnd = HWND(hwnd.0);
+    let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS;
+    if let Err(error) = unsafe { SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags) } {
+        tracing::warn!("could not bring the meeting prompt to the front: {error}");
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn raise_to_top(_window: &WebviewWindow) {}
+
+/// Called from the detector's loop: puts a prompt that is on screen back in front.
+fn keep_on_top(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
+        if window.is_visible().unwrap_or(false) {
+            raise_to_top(&window);
+        }
+    }
+}
 
 fn show_state(app: &tauri::AppHandle, state: MeetingPromptPayload) -> Result<(), String> {
     if !is_enabled(app) {
@@ -570,6 +606,7 @@ fn start_worker(app: &tauri::AppHandle) -> Result<(), String> {
         .name("meeting-prompt".into())
         .spawn(move || {
             let detector = meeting_detect::watch(POLL_INTERVAL);
+            let mut raised_at = Instant::now();
             loop {
                 match stop_receiver.try_recv() {
                     Ok(()) | Err(TryRecvError::Disconnected) => break,
@@ -581,6 +618,10 @@ fn start_worker(app: &tauri::AppHandle) -> Result<(), String> {
                     Err(RecvTimeoutError::Disconnected) => break,
                 }
                 tick_auto(&worker_app);
+                if raised_at.elapsed() >= RAISE_INTERVAL {
+                    raised_at = Instant::now();
+                    keep_on_top(&worker_app);
+                }
             }
             drop(detector);
         })
