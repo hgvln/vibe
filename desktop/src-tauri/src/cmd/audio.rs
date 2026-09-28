@@ -152,6 +152,9 @@ pub async fn start_record(app_handle: AppHandle, devices: Vec<AudioDevice>, reco
     if devices.is_empty() {
         bail!("At least one audio device is required");
     }
+    // An unnamed recording is named after when it started, not when it stopped: that is the time
+    // people look it up by, and the one a meeting's calendar entry carries.
+    let started_at = get_local_time();
     let host = cpal::default_host();
 
     let mut wav_paths: Vec<(PathBuf, u32)> = Vec::new();
@@ -253,7 +256,7 @@ pub async fn start_record(app_handle: AppHandle, devices: Vec<AudioDevice>, reco
             .as_deref()
             .map(crate::cmd::files::sanitize_filename_stem)
             .filter(|name| !name.is_empty())
-            .unwrap_or_else(get_local_time);
+            .unwrap_or(started_at);
         let temp_dir = get_vibe_temp_folder();
         let normalized = crate::cmd::files::available_path(&temp_dir, &recording_stem, "wav");
         let output = match crate::ffmpeg::normalize(dst.clone(), normalized.clone(), None) {
