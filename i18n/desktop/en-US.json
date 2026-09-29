@@ -271,6 +271,8 @@
 	"permissionNotApplicable": "Not applicable",
 	"requestPermission": "Request access",
 	"openSystemSettings": "Open System Settings",
+	"screenRecordingMissingTitle": "Google Meet and Cal Video calls are not detected",
+	"screenRecordingMissingBody": "macOS no longer allows Vibe to see calls. In System Settings › Screen & System Audio Recording, turn “vibe” off and on again, then restart Vibe.",
 	"permissionChecking": "Checking…",
 	"permissionCheckFailed": "Could not check permission status",
 	"permissionRestricted": "Restricted",

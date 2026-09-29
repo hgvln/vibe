@@ -14,6 +14,7 @@ import { ErrorBoundary } from 'react-error-boundary'
 import { BoundaryFallback } from './components/boundary-fallback'
 import ErrorModalWithContext from './components/error-modal-with-context'
 import HandoffTranscriptSaver from './components/handoff-transcript-saver'
+import ScreenRecordingAlert from './components/screen-recording-alert'
 import { FilesProvider } from './providers/files-provider'
 import { HotkeyProvider } from './providers/hotkey'
 import { RecordingShortcutProvider } from './providers/recording-shortcut'
@@ -57,6 +58,8 @@ function AppContent() {
 										<UpdateProgress />
 										{/* Phone transcriptions arrive while the user is elsewhere, so this must outlive any page. */}
 										<HandoffTranscriptSaver />
+										{/* Meet and Cal Video go undetected without it, silently: say so at launch. */}
+										<ScreenRecordingAlert />
 										<FilesProvider>
 											<Routes>
 												<Route path="/" element={<MainPage />} />
