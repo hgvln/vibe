@@ -202,12 +202,17 @@ mod platform {
         if browsers.is_empty() {
             return None;
         }
+        // Polled every second while the microphone is open, so said once per loss, not per scan.
+        static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         if !ScreenCaptureAccess.preflight() {
             // Without this permission the window list comes back with no titles at all, which is
             // indistinguishable from "no meeting" — so say it out loud rather than return silence.
-            tracing::warn!("screen recording permission missing; Google Meet cannot be detected");
+            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                tracing::warn!("screen recording permission missing; Google Meet cannot be detected");
+            }
             return None;
         }
+        WARNED.store(false, std::sync::atomic::Ordering::Relaxed);
 
         let windows = copy_window_info(
             kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,

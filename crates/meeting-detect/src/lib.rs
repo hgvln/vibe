@@ -114,6 +114,9 @@ struct DetectionSnapshot {
     mic_active: bool,
     /// Whether a browser that could be hosting Meet is still running and a microphone candidate.
     browser_present: bool,
+    /// Who holds the microphone, by process name, for the log. macOS cannot say, so there these are
+    /// the meeting apps and browsers that are merely running.
+    owners: Vec<String>,
 }
 
 /// `scan_titles` enables the browser window-title lookup that identifies Meet. Callers that already
@@ -126,6 +129,7 @@ fn poll(scan_titles: bool) -> DetectionSnapshot {
             state: MeetingState::inactive(),
             mic_active: false,
             browser_present: false,
+            owners: Vec::new(),
         };
     }
 
@@ -137,10 +141,14 @@ fn poll(scan_titles: bool) -> DetectionSnapshot {
     let browser_present = processes
         .iter()
         .any(|info| process::source(info) == Some(ProcessKind::Browser));
+    let mut owners: Vec<String> = processes.iter().map(|info| info.name.clone()).collect();
+    owners.sort_unstable();
+    owners.dedup();
     DetectionSnapshot {
         state: classify_active(processes, scan_titles),
         mic_active: true,
         browser_present,
+        owners,
     }
 }
 
@@ -291,6 +299,11 @@ where
             // The microphone opening or closing is the leading edge of every change worth
             // reporting, so keep polling fast until the state that follows it has been emitted.
             let mic_changed = snapshot.mic_active != mic_active;
+            if mic_changed {
+                // Logged whether or not a meeting follows: a call that never shows up here means the
+                // microphone signal itself is blind, not the meeting recognition.
+                tracing::debug!(mic_active = snapshot.mic_active, owners = ?snapshot.owners, "microphone signal changed");
+            }
             mic_active = snapshot.mic_active;
             let mut next = snapshot.state;
             // A browser can stop exposing the Meet title as soon as the user switches tabs. Once
@@ -370,6 +383,7 @@ mod tests {
             browser_present: mic_active,
             state,
             mic_active,
+            owners: Vec::new(),
         }
     }
 
@@ -526,6 +540,7 @@ mod tests {
                     state: if polls <= 3 { meet.clone() } else { MeetingState::inactive() },
                     mic_active: true,
                     browser_present: polls <= 3,
+                    owners: Vec::new(),
                 }
             }
         });

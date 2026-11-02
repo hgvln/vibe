@@ -129,12 +129,143 @@ fn decode_windows_executable_key(key: &str) -> String {
     key.replace('#', "\\")
 }
 
+/// The owners both Windows signals name, once each. A consent-store owner is dropped when an audio
+/// session already names its executable: the session also knows the pid.
+#[cfg(any(target_os = "windows", test))]
+fn merge_owners(mut sessions: Vec<crate::ProcessInfo>, consent_store: Vec<crate::ProcessInfo>) -> Vec<crate::ProcessInfo> {
+    for owner in consent_store {
+        let named_by_session = owner.executable.as_deref().is_some_and(|executable| {
+            sessions.iter().any(|session| {
+                session
+                    .executable
+                    .as_deref()
+                    .is_some_and(|known| known.eq_ignore_ascii_case(executable))
+            })
+        });
+        if !named_by_session && !sessions.contains(&owner) {
+            sessions.push(owner);
+        }
+    }
+    sessions
+}
+
+/// Windows has two ways to learn who holds the microphone, and only one of them can be trusted.
+///
+/// The privacy consent store in the registry was the only one read for a long time, but Windows
+/// stopped writing to it on some machines: on Windows 11 26200 after the October 2026 updates, a
+/// capture leaves no trace there at all, and every meeting went undetected without a word. The
+/// audio engine's capture sessions are the source of truth — a process streaming from a
+/// microphone has an active session on that endpoint, with its pid — so they come first, and the
+/// consent store only adds what they miss.
 #[cfg(target_os = "windows")]
 mod platform {
     use crate::{MicUsage, ProcessInfo};
     use std::path::Path;
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
     use winreg::{enums::HKEY_CURRENT_USER, RegKey};
+
+    /// Processes streaming from any active microphone right now, read from the audio engine.
+    mod audio_sessions {
+        use crate::ProcessInfo;
+        use std::path::Path;
+        use windows::core::{Interface, PWSTR};
+        use windows::Win32::Foundation::{CloseHandle, S_OK};
+        use windows::Win32::Media::Audio::{
+            eCapture, AudioSessionStateActive, IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator,
+            MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
+        };
+        use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED};
+        use windows::Win32::System::Threading::{
+            OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+
+        /// Balances a successful `CoInitializeEx`. A thread already in another apartment refuses
+        /// it and can use COM as it is, so there is nothing to undo then.
+        struct Com(bool);
+
+        impl Drop for Com {
+            fn drop(&mut self) {
+                if self.0 {
+                    unsafe { CoUninitialize() };
+                }
+            }
+        }
+
+        pub(super) fn capturing_processes() -> Vec<ProcessInfo> {
+            let _com = Com(unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok());
+            let mut pids = Vec::new();
+            if let Err(error) = active_capture_pids(&mut pids) {
+                tracing::debug!("cannot read the microphone audio sessions: {error}");
+            }
+            pids.sort_unstable();
+            pids.dedup();
+            pids.into_iter().map(process_info).collect()
+        }
+
+        fn active_capture_pids(pids: &mut Vec<u32>) -> windows::core::Result<()> {
+            let enumerator: IMMDeviceEnumerator = unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }?;
+            let devices = unsafe { enumerator.EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE) }?;
+            for index in 0..unsafe { devices.GetCount() }? {
+                // One unreadable microphone must not hide the others.
+                let Ok(device) = (unsafe { devices.Item(index) }) else {
+                    continue;
+                };
+                let Ok(manager) = (unsafe { device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) }) else {
+                    continue;
+                };
+                let Ok(sessions) = (unsafe { manager.GetSessionEnumerator() }) else {
+                    continue;
+                };
+                for session in 0..unsafe { sessions.GetCount() }.unwrap_or(0) {
+                    let Ok(control) =
+                        (unsafe { sessions.GetSession(session) }).and_then(|control| control.cast::<IAudioSessionControl2>())
+                    else {
+                        continue;
+                    };
+                    // A session outlives its stream: an idle one stays listed, only an active one captures.
+                    if unsafe { control.GetState() }.ok() != Some(AudioSessionStateActive) {
+                        continue;
+                    }
+                    if unsafe { control.IsSystemSoundsSession() } == S_OK {
+                        continue;
+                    }
+                    if let Ok(pid) = unsafe { control.GetProcessId() } {
+                        if pid != 0 {
+                            pids.push(pid);
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        fn process_info(pid: u32) -> ProcessInfo {
+            let executable = image_path(pid);
+            let name = executable
+                .as_deref()
+                .and_then(|path| Path::new(path).file_name())
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("pid {pid}"));
+            ProcessInfo {
+                pid: Some(pid),
+                name,
+                executable,
+                bundle_id: None,
+            }
+        }
+
+        fn image_path(pid: u32) -> Option<String> {
+            let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+            let mut buffer = [0_u16; 1024];
+            let mut length = buffer.len() as u32;
+            let read =
+                unsafe { QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, PWSTR(buffer.as_mut_ptr()), &mut length) };
+            let _ = unsafe { CloseHandle(process) };
+            read.ok()?;
+            Some(String::from_utf16_lossy(&buffer[..length as usize]))
+        }
+    }
 
     const CONSENT_STORE: &str = r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone";
 
@@ -219,8 +350,17 @@ mod platform {
     }
 
     pub(super) fn current_usage() -> MicUsage {
+        let mut processes = super::merge_owners(audio_sessions::capturing_processes(), consent_store_owners());
+        attach_pids(&mut processes);
+        MicUsage {
+            active: !processes.is_empty(),
+            processes,
+        }
+    }
+
+    fn consent_store_owners() -> Vec<ProcessInfo> {
         let Ok(store) = RegKey::predef(HKEY_CURRENT_USER).open_subkey(CONSENT_STORE) else {
-            return MicUsage::default();
+            return Vec::new();
         };
         let mut processes = Vec::new();
         for child_name in store.enum_keys().flatten() {
@@ -238,11 +378,7 @@ mod platform {
                 });
             }
         }
-        attach_pids(&mut processes);
-        MicUsage {
-            active: !processes.is_empty(),
-            processes,
-        }
+        processes
     }
 }
 
@@ -374,5 +510,42 @@ Source Output #18
             decode_windows_executable_key(r"C:#Program Files#Zoom#bin#Zoom.exe"),
             r"C:\Program Files\Zoom\bin\Zoom.exe"
         );
+    }
+
+    fn owner(pid: Option<u32>, executable: Option<&str>, bundle_id: Option<&str>) -> crate::ProcessInfo {
+        crate::ProcessInfo {
+            pid,
+            name: executable
+                .and_then(|path| path.rsplit('\\').next())
+                .or(bundle_id)
+                .unwrap_or_default()
+                .to_string(),
+            executable: executable.map(str::to_string),
+            bundle_id: bundle_id.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn an_audio_session_alone_is_enough_when_the_consent_store_is_silent() {
+        let brave = owner(
+            Some(11212),
+            Some(r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"),
+            None,
+        );
+        assert_eq!(merge_owners(vec![brave.clone()], Vec::new()), vec![brave]);
+    }
+
+    #[test]
+    fn the_consent_store_adds_only_the_owners_the_sessions_missed() {
+        let chrome_session = owner(Some(42), Some(r"C:\Program Files\Google\Chrome\Application\chrome.exe"), None);
+        // Same executable, other case, no pid: the session already says it, with its pid.
+        let chrome_store = owner(None, Some(r"c:\program files\google\chrome\application\CHROME.EXE"), None);
+        let zoom_store = owner(None, Some(r"C:\Users\me\AppData\Roaming\Zoom\bin\Zoom.exe"), None);
+        let teams_store = owner(None, None, Some("MSTeams_8wekyb3d8bbwe"));
+        let merged = merge_owners(
+            vec![chrome_session.clone()],
+            vec![chrome_store, zoom_store.clone(), teams_store.clone(), teams_store.clone()],
+        );
+        assert_eq!(merged, vec![chrome_session, zoom_store, teams_store]);
     }
 }
